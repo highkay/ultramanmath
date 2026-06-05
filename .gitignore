@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.wrangler/
+.playwright-mcp/
+
+.vite/
+*.log
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+
+.env
+.env.*
+!.env.example
+
+# Local source audio files; optimized runtime copies live under public/assets/audio.
+/battle.mp3
+/theme.mp3
+
+# Playwright and manual verification screenshots written at the repo root.
+/*.png
