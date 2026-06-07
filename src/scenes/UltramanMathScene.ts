@@ -1118,13 +1118,15 @@ export class UltramanMathScene extends Phaser.Scene {
     if (!this.battle) return 0;
     const defense = Math.round(this.battle.monster.defense * this.battle.difficulty.defenseMultiplier);
     const base = Math.max(8, this.battle.hero.attack - defense);
-    return special ? Math.round(base * 3) : base;
+    return special ? Math.round(base * 2.7) : base;
   }
 
   private monsterDamage(): number {
     if (!this.battle) return 0;
     const attack = Math.round(this.battle.monster.attack * this.battle.difficulty.attackMultiplier);
-    return Math.max(5, attack - this.battle.hero.defense);
+    const defenseReduction = Math.round(this.battle.hero.defense * 0.38);
+    const stagePressure = Math.ceil(this.battle.monster.stage * 0.45);
+    return Math.max(8, attack + stagePressure - defenseReduction);
   }
 
   private rewardFor(monster: Monster, difficulty: Difficulty): number {
