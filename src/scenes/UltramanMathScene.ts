@@ -150,13 +150,13 @@ export class UltramanMathScene extends Phaser.Scene {
   }
 
   preload(): void {
-    this.load.image("backgrounds", "/assets/generated/battle-backgrounds.png");
-    this.load.image(UI_KIT_KEY, "/assets/generated/ui/ui-kit.png");
-    this.load.image(HERO_ATLAS_KEY, "/assets/generated/transparent/heroes-clean.png");
-    this.load.image(MONSTER_ATLAS_KEYS.monsters1, "/assets/generated/transparent/monsters-01-clean.png");
-    this.load.image(MONSTER_ATLAS_KEYS.monsters2, "/assets/generated/transparent/monsters-02-clean.png");
-    this.load.image(MONSTER_ATLAS_KEYS.monsters3, "/assets/generated/transparent/monsters-03-clean.png");
-    this.load.image(MONSTER_ATLAS_KEYS.monsters4, "/assets/generated/transparent/monsters-04-clean.png");
+    this.load.image("backgrounds", this.generatedImage("battle-backgrounds"));
+    this.load.image(UI_KIT_KEY, this.generatedImage("ui/ui-kit"));
+    this.load.image(HERO_ATLAS_KEY, this.generatedImage("transparent/heroes-clean"));
+    this.load.image(MONSTER_ATLAS_KEYS.monsters1, this.generatedImage("transparent/monsters-01-clean"));
+    this.load.image(MONSTER_ATLAS_KEYS.monsters2, this.generatedImage("transparent/monsters-02-clean"));
+    this.load.image(MONSTER_ATLAS_KEYS.monsters3, this.generatedImage("transparent/monsters-03-clean"));
+    this.load.image(MONSTER_ATLAS_KEYS.monsters4, this.generatedImage("transparent/monsters-04-clean"));
     this.load.audio("themeMusic", "/assets/audio/theme.mp3");
     this.load.audio("battleMusic", "/assets/audio/battle.mp3");
     this.load.audio("clickSfx", "/assets/audio/click.mp3");
@@ -172,6 +172,12 @@ export class UltramanMathScene extends Phaser.Scene {
     this.load.audio("monsterAttackVoice", "/assets/audio/voices/voice-monster-attack.mp3");
     this.load.audio("monsterDefeatVoice", "/assets/audio/voices/voice-monster-defeat.mp3");
     this.load.audio("monsterWinVoice", "/assets/audio/voices/voice-monster-win.mp3");
+  }
+
+  private generatedImage(path: string): string {
+    const extension = (window as Window & { __ultramanmathPreferredImageExt?: "webp" | "png" })
+      .__ultramanmathPreferredImageExt ?? "png";
+    return `/assets/generated/${path}.${extension}`;
   }
 
   create(): void {
@@ -1575,6 +1581,11 @@ export class UltramanMathScene extends Phaser.Scene {
 
   private specialMontage(text: string, color: number): void {
     if (!this.battle) return;
+    const battleText = [this.battle.questionText, this.battle.answerText, this.battle.statusText];
+    const battleTextAlphas = battleText.map((item) => item.alpha);
+    battleText.forEach((item) => this.tweens.killTweensOf(item));
+    this.tweens.add({ targets: battleText, alpha: 0, duration: 120, ease: "Quad.easeOut" });
+
     const overlay = this.addObject(this.add.rectangle(WIDTH / 2, HEIGHT / 2, WIDTH, HEIGHT, 0x020814, 0));
     overlay.setDepth(130);
     const flash = this.addObject(this.add.rectangle(WIDTH / 2, HEIGHT / 2, WIDTH, HEIGHT, color, 0));
@@ -1663,6 +1674,11 @@ export class UltramanMathScene extends Phaser.Scene {
           titleGlow.destroy();
           title.destroy();
           bands.forEach((band) => band.destroy());
+          if (this.battle) {
+            battleText.forEach((item, index) => {
+              if (item.active) item.setAlpha(battleTextAlphas[index]);
+            });
+          }
         }
       });
     });
