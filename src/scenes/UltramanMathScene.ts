@@ -19,6 +19,25 @@ import { generateProblem, type Problem } from "../game/math";
 import { type SaveData, loadSave, persistSave, resetSave } from "../game/storage";
 
 type BattleMode = "story" | "challenge";
+type BattleSide = "hero" | "monster";
+
+interface PoseAnimationFrame {
+  variant: number;
+  duration: number;
+}
+
+interface MotionTextureVariant {
+  variant: number;
+  dx?: number;
+  dy?: number;
+  scaleX?: number;
+  scaleY?: number;
+  skewX?: number;
+  rotation?: number;
+  smearCopies?: number;
+  smearX?: number;
+  smearY?: number;
+}
 
 interface BattleConfig {
   mode: BattleMode;
@@ -103,12 +122,23 @@ type SfxKey =
   | "monsterAttackVoice"
   | "monsterDefeatVoice"
   | "monsterWinVoice";
+type VoiceKey = Extract<
+  SfxKey,
+  | "heroAttackVoice"
+  | "heroSpecialVoice"
+  | "heroHurtVoice"
+  | "heroWinVoice"
+  | "monsterAttackVoice"
+  | "monsterDefeatVoice"
+  | "monsterWinVoice"
+>;
 
 const WIDTH = 960;
 const HEIGHT = 540;
 const HERO_COLUMNS = 6;
 const MONSTER_COLUMNS = 5;
 const POSE_ROWS = 4;
+const POSES_BY_ROW: Pose[] = ["stand", "attack", "special", "hurt"];
 const HERO_ATLAS_KEY = "heroesAtlas";
 const UI_KIT_KEY = "uiKit";
 const MONSTER_ATLAS_KEYS: Record<Monster["sheet"], string> = {
@@ -130,6 +160,7 @@ const MUTE_STORAGE_KEY = "ultramanmath-muted";
 const BATTLE_TIMER_WIDTH = 300;
 const BATTLE_TIMER_LEFT = WIDTH / 2 - BATTLE_TIMER_WIDTH / 2;
 const BATTLE_TIMER_Y = 286;
+const VOICE_VOLUME_BOOST = 1.28;
 
 export class UltramanMathScene extends Phaser.Scene {
   private objects: Phaser.GameObjects.GameObject[] = [];
@@ -144,6 +175,8 @@ export class UltramanMathScene extends Phaser.Scene {
   private pendingMusicKey?: MusicKey;
   private waitingForAudioUnlock = false;
   private muted = false;
+  private poseTimers: Partial<Record<BattleSide, Phaser.Time.TimerEvent>> = {};
+  private poseTokens: Record<BattleSide, number> = { hero: 0, monster: 0 };
 
   constructor() {
     super("ultramanmath");
@@ -207,6 +240,8 @@ export class UltramanMathScene extends Phaser.Scene {
   }
 
   private clearScreen(): void {
+    this.stopPoseSequence("hero");
+    this.stopPoseSequence("monster");
     this.battle = undefined;
     this.parallaxObjects = [];
     for (const object of this.objects) object.destroy();
@@ -380,8 +415,8 @@ export class UltramanMathScene extends Phaser.Scene {
     heroSprite.setFlipX(true);
     const monsterSprite = this.addObject(this.add.image(750, 471, this.monsterTextureKey(monster, "stand")).setOrigin(0.5, 1).setScale(1.22));
     monsterSprite.setFlipX(true);
-    this.startBreathing(heroSprite, 7, 1250);
-    this.startBreathing(monsterSprite, 5, 1420);
+    this.configureBreathing(heroSprite, 7, 1250);
+    this.configureBreathing(monsterSprite, 5, 1420);
 
     const heroHpBar = this.healthBar(92, 78, 310, 22, 0x54d76b);
     const monsterHpBar = this.healthBar(560, 78, 310, 22, 0xff665d);
@@ -567,32 +602,33 @@ export class UltramanMathScene extends Phaser.Scene {
   private heroAttack(special: boolean): void {
     if (!this.battle) return;
     const damage = this.heroDamage(special);
-    this.setPose("hero", special ? "special" : "attack");
+    this.playPoseSequence("hero", special ? "special" : "attack", special ? this.specialPoseFrames() : this.attackPoseFrames());
     this.battle.statusText.text = special ? this.heroSkillName(this.battle.hero) : "发射！";
     this.playSfx(special ? "blastSfx" : "confirmSfx", special ? 0.75 : 0.48);
-    this.playSfx(special ? "heroSpecialVoice" : "heroAttackVoice", special ? 0.82 : 0.64);
+    this.playVoice(special ? "heroSpecialVoice" : "heroAttackVoice", special ? 0.86 : 0.76);
     if (special) {
       this.specialMontage(this.heroSkillName(this.battle.hero), this.battle.effect.color);
     }
     this.flashBeam(300, 352, 684, 344, this.battle.effect.color, special);
     this.tweens.add({
       targets: this.battle.heroSprite,
-      x: 238,
+      x: special ? 224 : 238,
       yoyo: true,
-      duration: 190,
+      duration: special ? 240 : 190,
       ease: "Quad.easeOut"
     });
     this.time.delayedCall(special ? SPECIAL_IMPACT_DELAY : HERO_IMPACT_DELAY, () => {
       if (!this.battle) return;
       this.playSfx("hitSfx", special ? 0.78 : 0.58);
-      this.setPose("monster", "hurt");
+      this.playPoseSequence("monster", "hurt", this.hurtPoseFrames());
       this.battle.monsterHp = Math.max(0, this.battle.monsterHp - damage);
       this.updateHpBars();
       this.cameraShake(special ? 0.012 : 0.006);
       if (this.battle.monsterHp <= 0) {
         const defeatedMonster = this.battle.monsterSprite;
+        this.stopPoseSequence("monster");
         this.tweens.killTweensOf(defeatedMonster);
-        this.playSfx("monsterDefeatVoice", special ? 0.72 : 0.62);
+        this.playVoice("monsterDefeatVoice", special ? 0.74 : 0.68);
         this.monsterExplosion(defeatedMonster.x, defeatedMonster.y - 150, special);
         this.tweens.add({
           targets: defeatedMonster,
@@ -613,8 +649,8 @@ export class UltramanMathScene extends Phaser.Scene {
   private monsterAttack(): void {
     if (!this.battle) return;
     const damage = this.monsterDamage();
-    this.setPose("monster", "attack");
-    this.playSfx("monsterAttackVoice", 0.66);
+    this.playPoseSequence("monster", "attack", this.attackPoseFrames());
+    this.playVoice("monsterAttackVoice", 0.76);
     this.monsterStrikeEffect(658, 286, 315, 288);
     this.tweens.add({
       targets: this.battle.monsterSprite,
@@ -626,10 +662,10 @@ export class UltramanMathScene extends Phaser.Scene {
     this.time.delayedCall(MONSTER_IMPACT_DELAY, () => {
       if (!this.battle) return;
       this.playSfx("hitSfx", 0.55);
-      this.setPose("hero", "hurt");
+      this.playPoseSequence("hero", "hurt", this.hurtPoseFrames());
       this.battle.heroHp = Math.max(0, this.battle.heroHp - damage);
       this.updateHpBars();
-      if (this.battle.heroHp > 0) this.playSfx("heroHurtVoice", 0.54);
+      if (this.battle.heroHp > 0) this.playVoice("heroHurtVoice", 0.7);
       this.cameraShake(0.008);
       if (this.battle.heroHp <= 0) {
         this.time.delayedCall(760, () => this.finishBattle(false));
@@ -656,7 +692,7 @@ export class UltramanMathScene extends Phaser.Scene {
     }
 
     this.playSfx(won ? "winSfx" : "failSfx", 0.72);
-    this.playSfx(won ? "heroWinVoice" : "monsterWinVoice", won ? 0.7 : 0.62);
+    this.playVoice(won ? "heroWinVoice" : "monsterWinVoice", won ? 0.76 : 0.72);
     this.clearScreen();
     this.drawMenuBackground();
 
@@ -814,13 +850,109 @@ export class UltramanMathScene extends Phaser.Scene {
     this.showShop("effects");
   }
 
-  private setPose(side: "hero" | "monster", pose: "stand" | "attack" | "special" | "hurt"): void {
+  private setPose(side: BattleSide, pose: Pose): void {
     if (!this.battle) return;
+    this.stopPoseSequence(side);
+    const sprite = this.characterSprite(side);
+    if (!sprite) return;
+    sprite.setTexture(this.characterTextureKey(side, pose));
+  }
+
+  private playPoseSequence(side: BattleSide, pose: Pose, frames: PoseAnimationFrame[]): void {
+    if (!this.battle || frames.length === 0) return;
+    const sprite = this.characterSprite(side);
+    if (!sprite) return;
+    this.stopPoseSequence(side);
+    this.holdCharacterGround(sprite);
+    const token = this.poseTokens[side];
+    let frameIndex = 0;
+    const advance = () => {
+      if (!this.battle || this.poseTokens[side] !== token || !sprite.active) return;
+      const frame = frames[frameIndex];
+      sprite.setTexture(this.characterTextureKey(side, pose, frame.variant));
+      frameIndex += 1;
+      if (frameIndex >= frames.length) {
+        delete this.poseTimers[side];
+        this.resumeCharacterBreathing(side, sprite);
+        return;
+      }
+      this.poseTimers[side] = this.time.delayedCall(frame.duration, advance);
+    };
+    advance();
+  }
+
+  private stopPoseSequence(side: BattleSide): void {
+    const timer = this.poseTimers[side];
+    if (timer) timer.remove(false);
+    delete this.poseTimers[side];
+    this.poseTokens[side] += 1;
+  }
+
+  private characterSprite(side: BattleSide): Phaser.GameObjects.Image | undefined {
+    if (!this.battle) return undefined;
+    return side === "hero" ? this.battle.heroSprite : this.battle.monsterSprite;
+  }
+
+  private holdCharacterGround(sprite: Phaser.GameObjects.Image): void {
+    this.tweens.killTweensOf(sprite);
+    const baseX = sprite.getData("baseX") as number | undefined;
+    const baseY = sprite.getData("baseY") as number | undefined;
+    const baseScaleY = sprite.getData("baseScaleY") as number | undefined;
+    if (typeof baseX === "number") sprite.x = baseX;
+    if (typeof baseY === "number") sprite.y = baseY;
+    if (typeof baseScaleY === "number") sprite.scaleY = baseScaleY;
+  }
+
+  private resumeCharacterBreathing(side: BattleSide, sprite: Phaser.GameObjects.Image): void {
+    if (!this.battle || !sprite.active) return;
+    if (side === "hero" && this.battle.heroHp <= 0) return;
+    if (side === "monster" && this.battle.monsterHp <= 0) return;
+    const amount = sprite.getData("breathAmount") as number | undefined;
+    const duration = sprite.getData("breathDuration") as number | undefined;
+    if (typeof amount !== "number" || typeof duration !== "number") return;
+    this.holdCharacterGround(sprite);
+    this.startBreathing(sprite, amount, duration);
+  }
+
+  private characterTextureKey(side: BattleSide, pose: Pose, variant = 0): string {
+    if (!this.battle) return "";
     if (side === "hero") {
-      this.battle.heroSprite.setTexture(this.heroTextureKey(this.battle.hero, pose));
-    } else {
-      this.battle.monsterSprite.setTexture(this.monsterTextureKey(this.battle.monster, pose));
+      return this.heroTextureKey(this.battle.hero, pose, variant);
     }
+    return this.monsterTextureKey(this.battle.monster, pose, variant);
+  }
+
+  private attackPoseFrames(): PoseAnimationFrame[] {
+    return [
+      { variant: 1, duration: 74 },
+      { variant: 2, duration: 82 },
+      { variant: 3, duration: 96 },
+      { variant: 4, duration: 118 },
+      { variant: 0, duration: 160 }
+    ];
+  }
+
+  private specialPoseFrames(): PoseAnimationFrame[] {
+    return [
+      { variant: 1, duration: 100 },
+      { variant: 2, duration: 118 },
+      { variant: 3, duration: 142 },
+      { variant: 4, duration: 170 },
+      { variant: 5, duration: 190 },
+      { variant: 3, duration: 150 },
+      { variant: 2, duration: 132 },
+      { variant: 0, duration: 220 }
+    ];
+  }
+
+  private hurtPoseFrames(): PoseAnimationFrame[] {
+    return [
+      { variant: 1, duration: 64 },
+      { variant: 2, duration: 78 },
+      { variant: 3, duration: 92 },
+      { variant: 4, duration: 132 },
+      { variant: 0, duration: 220 }
+    ];
   }
 
   private buildCharacterTextures(): void {
@@ -904,8 +1036,97 @@ export class UltramanMathScene extends Phaser.Scene {
         context.clearRect(0, 0, outputWidth, outputHeight);
         if (extraction) context.drawImage(extraction.canvas, dx, dy);
         canvasTexture.refresh();
+        this.createMotionFrameTextures(key, canvasTexture.getCanvas(), outputWidth, outputHeight, POSES_BY_ROW[row]);
       }
     }
+  }
+
+  private createMotionFrameTextures(
+    baseKey: string,
+    sourceCanvas: HTMLCanvasElement,
+    outputWidth: number,
+    outputHeight: number,
+    pose: Pose
+  ): void {
+    for (const variant of this.motionVariantsForPose(pose)) {
+      const key = this.motionFrameTextureKey(baseKey, variant.variant);
+      if (this.textures.exists(key)) this.textures.remove(key);
+      const canvasTexture = this.textures.createCanvas(key, outputWidth, outputHeight);
+      if (!canvasTexture) continue;
+      const context = canvasTexture.getContext();
+      context.clearRect(0, 0, outputWidth, outputHeight);
+      context.imageSmoothingEnabled = true;
+      const copies = variant.smearCopies ?? 0;
+      for (let copy = copies; copy > 0; copy -= 1) {
+        const alpha = 0.12 * (copy / copies);
+        this.drawMotionSource(
+          context,
+          sourceCanvas,
+          outputWidth,
+          outputHeight,
+          variant,
+          alpha,
+          (variant.smearX ?? 0) * copy,
+          (variant.smearY ?? 0) * copy
+        );
+      }
+      this.drawMotionSource(context, sourceCanvas, outputWidth, outputHeight, variant);
+      canvasTexture.refresh();
+    }
+  }
+
+  private motionVariantsForPose(pose: Pose): MotionTextureVariant[] {
+    if (pose === "attack") {
+      return [
+        { variant: 1, dx: -5, dy: 3, scaleX: 0.96, scaleY: 1.04, skewX: -0.05, rotation: -0.015 },
+        { variant: 2, dx: 4, dy: -2, scaleX: 1.05, scaleY: 0.98, skewX: 0.06, rotation: 0.015, smearCopies: 1, smearX: -6 },
+        { variant: 3, dx: 10, dy: -4, scaleX: 1.1, scaleY: 0.95, skewX: 0.1, rotation: 0.026, smearCopies: 2, smearX: -8 },
+        { variant: 4, dx: 2, dy: 1, scaleX: 1.02, scaleY: 1.01, skewX: 0.03, rotation: -0.01 }
+      ];
+    }
+
+    if (pose === "special") {
+      return [
+        { variant: 1, scaleX: 0.98, scaleY: 1.02, skewX: -0.018, rotation: -0.006 },
+        { variant: 2, scaleX: 1.02, scaleY: 0.995, skewX: 0.014, rotation: 0.004, smearCopies: 1, smearX: -3 },
+        { variant: 3, scaleX: 1.035, scaleY: 0.985, skewX: 0.022, rotation: 0.007, smearCopies: 1, smearX: -4 },
+        { variant: 4, scaleX: 1.045, scaleY: 0.98, skewX: 0.026, rotation: 0.006, smearCopies: 1, smearX: -4 },
+        { variant: 5, scaleX: 1.015, scaleY: 1.01, skewX: 0.01, rotation: -0.004, smearCopies: 1, smearX: -2 }
+      ];
+    }
+
+    if (pose === "hurt") {
+      return [
+        { variant: 1, dx: -7, dy: 5, scaleX: 1.05, scaleY: 0.94, skewX: 0.08, rotation: 0.042, smearCopies: 1, smearX: 7 },
+        { variant: 2, dx: 5, dy: 2, scaleX: 0.97, scaleY: 1.05, skewX: -0.06, rotation: -0.03 },
+        { variant: 3, dx: -4, dy: 7, scaleX: 1.03, scaleY: 0.97, skewX: 0.05, rotation: 0.024 },
+        { variant: 4, dx: 0, dy: 2, scaleX: 1.01, scaleY: 1.01, skewX: -0.02, rotation: -0.01 }
+      ];
+    }
+
+    return [];
+  }
+
+  private drawMotionSource(
+    context: CanvasRenderingContext2D,
+    sourceCanvas: HTMLCanvasElement,
+    outputWidth: number,
+    outputHeight: number,
+    variant: MotionTextureVariant,
+    alpha = 1,
+    extraDx = 0,
+    extraDy = 0
+  ): void {
+    const originX = outputWidth / 2;
+    const originY = outputHeight - 12;
+    context.save();
+    context.globalAlpha = alpha;
+    context.translate(originX + (variant.dx ?? 0) + extraDx, originY + (variant.dy ?? 0) + extraDy);
+    context.rotate(variant.rotation ?? 0);
+    context.transform(variant.scaleX ?? 1, 0, variant.skewX ?? 0, variant.scaleY ?? 1, 0, 0);
+    context.translate(-originX, -originY);
+    context.drawImage(sourceCanvas, 0, 0);
+    context.restore();
   }
 
   private sourceCellBounds(
@@ -1102,16 +1323,21 @@ export class UltramanMathScene extends Phaser.Scene {
     };
   }
 
-  private heroTextureKey(hero: Hero, pose: Pose): string {
-    return this.frameTextureKey("hero", poseRow(pose), hero.column);
+  private heroTextureKey(hero: Hero, pose: Pose, variant = 0): string {
+    return this.frameTextureKey("hero", poseRow(pose), hero.column, variant);
   }
 
-  private monsterTextureKey(monster: Monster, pose: Pose): string {
-    return this.frameTextureKey(monster.sheet, poseRow(pose), monster.column);
+  private monsterTextureKey(monster: Monster, pose: Pose, variant = 0): string {
+    return this.frameTextureKey(monster.sheet, poseRow(pose), monster.column, variant);
   }
 
-  private frameTextureKey(prefix: string, row: number, column: number): string {
-    return `${prefix}-${row}-${column}`;
+  private frameTextureKey(prefix: string, row: number, column: number, variant = 0): string {
+    const baseKey = `${prefix}-${row}-${column}`;
+    return variant === 0 ? baseKey : this.motionFrameTextureKey(baseKey, variant);
+  }
+
+  private motionFrameTextureKey(baseKey: string, variant: number): string {
+    return `${baseKey}-motion-${variant}`;
   }
 
   private heroDamage(special: boolean): number {
@@ -1481,7 +1707,11 @@ export class UltramanMathScene extends Phaser.Scene {
     if (this.muted) return;
     const soundManager = this.sound as Phaser.Sound.BaseSoundManager & { locked?: boolean };
     if (soundManager.locked) return;
-    this.sound.play(key, { volume });
+    this.sound.play(key, { volume: Phaser.Math.Clamp(volume, 0, 1) });
+  }
+
+  private playVoice(key: VoiceKey, volume = 0.75): void {
+    this.playSfx(key, volume * VOICE_VOLUME_BOOST);
   }
 
   private toggleMute(label: Phaser.GameObjects.Text): void {
@@ -1557,7 +1787,20 @@ export class UltramanMathScene extends Phaser.Scene {
     });
   }
 
+  private configureBreathing(sprite: Phaser.GameObjects.Image, amount: number, duration: number): void {
+    sprite.setData("baseX", sprite.x);
+    sprite.setData("baseY", sprite.y);
+    sprite.setData("baseScaleY", sprite.scaleY);
+    sprite.setData("breathAmount", amount);
+    sprite.setData("breathDuration", duration);
+    this.startBreathing(sprite, amount, duration);
+  }
+
   private startBreathing(sprite: Phaser.GameObjects.Image, amount: number, duration: number): void {
+    const baseY = sprite.getData("baseY") as number | undefined;
+    const baseScaleY = sprite.getData("baseScaleY") as number | undefined;
+    if (typeof baseY === "number") sprite.y = baseY;
+    if (typeof baseScaleY === "number") sprite.scaleY = baseScaleY;
     this.tweens.add({
       targets: sprite,
       y: sprite.y - amount,
